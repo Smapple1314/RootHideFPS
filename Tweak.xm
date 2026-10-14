@@ -11,11 +11,22 @@ static UIWindow *RFWindow;
 static BOOL RFLocked(void) {
     Class cls = NSClassFromString(@"SBLockScreenManager");
     SEL shared = NSSelectorFromString(@"sharedInstance");
-    SEL locked = NSSelectorFromString(@"isUILocked");
-    if (![cls respondsToSelector:shared]) return YES; // Fail closed on unsupported systems.
-    id manager = ((id (*)(id, SEL))objc_msgSend)(cls, shared);
-    if (![manager respondsToSelector:locked]) return YES;
-    return ((BOOL (*)(id, SEL))objc_msgSend)(manager, locked);
+    if ([cls respondsToSelector:shared]) {
+        id manager = ((id (*)(id, SEL))objc_msgSend)(cls, shared);
+        for (NSString *name in @[@"isUILocked", @"isLocked"]) {
+            SEL selector = NSSelectorFromString(name);
+            if ([manager respondsToSelector:selector])
+                return ((BOOL (*)(id, SEL))objc_msgSend)(manager, selector);
+        }
+    }
+    static int stateToken = -1;
+    if (stateToken == -1 && notify_register_check("com.apple.springboard.lockstate", &stateToken) != NOTIFY_STATUS_OK) {
+        stateToken = -1; return YES;
+    }
+    uint64_t state = 0;
+    if (notify_get_state(stateToken, &state) != NOTIFY_STATUS_OK) return YES;
+    // Fallback requires on-device validation; never force visibility on lock screen.
+    return state != 0;
 }
 static double RFValue(NSString *key) { return [RFConfig[key] doubleValue]; }
 static void RFSave(void) {
@@ -124,6 +135,7 @@ static void RFSet(NSString *key, double value) {
 }
 - (void)syncLock {
     self.locked = RFLocked();
+    NSLog(@"[RootHideFPS 0.1.1] Window ready; locked=%d scene=%@", self.locked, RFWindow.windowScene);
     if (self.locked) [self closeSettings];
     RFWindow.hidden = self.locked;
     [self applyConfig];
@@ -222,7 +234,19 @@ static void RFStart(void) {
     }
     for (NSString *key in @[@"red",@"green",@"blue",@"x",@"y"]) RFConfig[key] = @(fmin(1,fmax(0,RFValue(key))));
     RFConfig[@"size"] = @(fmin(48,fmax(10,RFValue(@"size"))));
-    RFWindow = [[RFPassWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    UIWindowScene *scene = nil;
+    for (UIScene *candidate in UIApplication.sharedApplication.connectedScenes) {
+        if ([candidate isKindOfClass:UIWindowScene.class]) {
+            scene = (UIWindowScene *)candidate;
+            if (candidate.activationState == UISceneActivationStateForegroundActive) break;
+        }
+    }
+    if (!scene) {
+        NSLog(@"[RootHideFPS 0.1.1] No UIWindowScene yet; waiting for scene activation");
+        return;
+    }
+    RFWindow = [[RFPassWindow alloc] initWithWindowScene:scene];
+    RFWindow.frame = scene.coordinateSpace.bounds;
     RFWindow.windowLevel = UIWindowLevelAlert + 100;
     RFWindow.backgroundColor = UIColor.clearColor;
     RFOverlay = [RFController new];
@@ -242,4 +266,23 @@ static void RFStart(void) {
     dispatch_async(dispatch_get_main_queue(), ^{ RFStart(); });
 }
 %end
+
+%ctor {
+    %init;
+    NSLog(@"[RootHideFPS 0.1.1] Dylib loaded");
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (NSString *name in @[UIApplicationDidFinishLaunchingNotification, UISceneDidActivateNotification]) {
+            [[NSNotificationCenter defaultCenter] addObserverForName:name object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+                RFStart();
+                if (RFOverlay) [RFOverlay syncLock];
+            }];
+        }
+        // Bounded retries cover injection after the launch callback has already run.
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(attempt * 2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                RFStart();
+            });
+        }
+    });
+}
 
