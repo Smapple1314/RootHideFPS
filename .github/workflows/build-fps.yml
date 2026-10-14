@@ -1,0 +1,47 @@
+name: Build RootHide deb
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packaging tools
+        run: brew install make dpkg ldid
+
+      - name: Install RootHide Theos
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --recursive https://github.com/roothide/theos.git "$HOME/theos-roothide"
+          echo "THEOS=$HOME/theos-roothide" >> "$GITHUB_ENV"
+          SDK_PATH="$(xcrun --sdk iphoneos --show-sdk-path)"
+          SDK_VERSION="$(xcrun --sdk iphoneos --show-sdk-version)"
+          mkdir -p "$HOME/theos-roothide/sdks"
+          ln -s "$SDK_PATH" "$HOME/theos-roothide/sdks/iPhoneOS${SDK_VERSION}.sdk"
+
+      - name: Compile and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$(brew --prefix make)/libexec/gnubin:$PATH"
+          make clean
+          make package FINALPACKAGE=1
+          DEB="$(python3 -c 'import glob; p=glob.glob("packages/*.deb"); assert len(p)==1, p; print(p[0])')"
+          test "$(dpkg-deb -f "$DEB" Architecture)" = iphoneos-arm64e
+          dpkg-deb --info "$DEB"
+
+      - name: Upload installable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: RootHideFPS-deb
+          path: packages/*.deb
+          if-no-files-found: error
