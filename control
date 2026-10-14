@@ -1,6 +1,6 @@
 Package: com.minis.roothidefps
 Name: RootHide FPS
-Version: 0.1.1
+Version: 0.1.2
 Architecture: iphoneos-arm64e
 Description: Configurable SpringBoard display callback frequency overlay. Source prototype.
 Maintainer: Minis
